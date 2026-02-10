@@ -2,6 +2,16 @@
 data/
 outputs/
 
+# runs / logs (HPC or local artifacts)
+runs/
+logs/
+
+# large artifacts
+*.joblib
+*.parquet
+*.tsv
+*.tar.gz
+
 # python
 .venv/
 __pycache__/

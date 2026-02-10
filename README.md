@@ -133,15 +133,27 @@ python -m src.cli slice   --run_dir outputs/smoke_lr_fix --topk_values 10
 python -m src.cli simulate --run_dir outputs/smoke_lr_fix --budget 50000
 ```
 
-## Example results (200k-row smoke run)
+## Results (Criteo DAC)
 
-On a local run (`max_rows=200000`, `chunksize=20000`, LR tuned as above):
+**Split:** time-based by log order, within `--max_rows` (train/val/test = 80%/10%/10%)  
+**Model:** SGD Logistic Regression (`--lr_alpha 1e-2 --lr_l1_ratio 0.0`)  
+**Features:** hashing for categoricals (`n_hash_buckets=2^20`), no frequency encoding
 
-- **AUC (test)** ≈ 0.737  
-- **LogLoss (test)** ≈ 0.519  
-- **NDCG@10** ≈ 0.581  
+### Offline CTR metrics
 
-> Exact numbers may vary slightly by machine / randomness / split boundaries.
+| Run | max_rows | Val AUC | Val LogLoss | Test AUC | Test LogLoss | NDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| LR (medium) | 10,000,000 | 0.7323 | 0.4955 | 0.7259 | 0.5094 | 0.5565 |
+| LR (full)   | 45,840,617 | 0.7337 | 0.4997 | 0.7333 | 0.5046 | 0.5636 |
+
+### Budgeted delivery simulation (budget = 5,000,000)
+
+| Run | expected_clicks | realized_clicks | expected_revenue | avg_pctr_selected |
+|---|---:|---:|---:|---:|
+| LR (10M)  | 248,132.99 | 259,595 | 281,223.90 | 0.24813 |
+| LR (full) | 1,190,458.33 | 1,188,541 | 1,349,350.15 | 0.25970 |
+
+> Metrics are computed on the internal val/test splits induced by `--max_rows`.
 
 ---
 
@@ -173,4 +185,35 @@ To still evaluate ranking quality, this repo computes **NDCG@K** over pseudo-gro
 - For large runs, prefer smaller `--chunksize` if you hit memory issues.  
 
 
+### 10M rows
+```bash
+python -m src.cli train \
+  --data_path data/criteo_train.tsv \
+  --out_dir outputs/lr_10m \
+  --max_rows 10000000 \
+  --chunksize 200000 \
+  --models lr \
+  --lr_alpha 1e-2 --lr_l1_ratio 0.0
 
+python -m src.cli evaluate --run_dir outputs/lr_10m
+python -m src.cli ranking  --run_dir outputs/lr_10m --k 10
+python -m src.cli slice    --run_dir outputs/lr_10m --topk_values 10
+python -m src.cli simulate --run_dir outputs/lr_10m --budget 5000000
+```
+
+### Full (45.8M rows)
+
+```bash
+python -m src.cli train \
+  --data_path data/criteo_train.tsv \
+  --out_dir outputs/lr_full \
+  --max_rows 45840617 \
+  --chunksize 200000 \
+  --models lr \
+  --lr_alpha 1e-2 --lr_l1_ratio 0.0
+
+python -m src.cli evaluate --run_dir outputs/lr_full
+python -m src.cli ranking  --run_dir outputs/lr_full --k 10
+python -m src.cli slice    --run_dir outputs/lr_full --topk_values 10
+python -m src.cli simulate --run_dir outputs/lr_full --budget 5000000
+```
