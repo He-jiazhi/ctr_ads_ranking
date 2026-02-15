@@ -58,7 +58,7 @@ def cmd_train(args):
         df_sample = pd.concat(df_sample, axis=0)
         freq_enc.fit(df_sample, CRITEO_CAT_COLS)
         # save freq tables
-        (out / "meta" / "freq_tables.json").write_text(json.dumps(freq_enc.tables)[:5_000_000], encoding="utf-8")
+        (out / "meta" / "freq_tables.json").write_text(json.dumps(freq_enc.tables), encoding="utf-8")
 
     fcfg = FeatureConfig(n_hash_buckets=args.n_hash_buckets, use_frequency_encoding=args.use_frequency_encoding, min_freq=args.min_freq)
 
@@ -77,6 +77,9 @@ def cmd_train(args):
         )
     if "lgbm" in args.models:
         models["lgbm"] = LightGBMWrapper()
+        # cache for LightGBM (train on train split; validate on val split)
+        lgbm_X_tr, lgbm_y_tr = [], []
+        lgbm_X_va, lgbm_y_va = [], []
 
     # Second pass: stream and train
     cur = 0
@@ -87,38 +90,80 @@ def cmd_train(args):
         cur = end
 
         # Determine which split this chunk overlaps; we'll train only on train range
-        if end <= train_range[0] or start >= train_range[1]:
+        in_train = not (end <= train_range[0] or start >= train_range[1])
+        in_val   = not (end <= val_range[0]   or start >= val_range[1])
+
+        if (not in_train) and (not (("lgbm" in models) and args.lgbm_fit and in_val)):
             continue
 
         # slice to train portion
-        s0 = max(0, train_range[0] - start)
-        s1 = min(n, train_range[1] - start)
-        df = chunk.iloc[s0:s1].copy()
+        if in_train:
+            s0 = max(0, train_range[0] - start)
+            s1 = min(n, train_range[1] - start)
+            df = chunk.iloc[s0:s1].copy()
 
-        y = df["label"].astype("int8").to_numpy()
+            y = df["label"].astype("int8").to_numpy()
 
-        X_num = build_numeric_matrix(df, CRITEO_NUM_COLS, fill=args.numeric_fill)
-        X_hash = build_hashed_csr(df, CRITEO_CAT_COLS, args.n_hash_buckets)
-        X_freq = freq_enc.transform(df, CRITEO_CAT_COLS) if freq_enc is not None else None
-        X = combine_features(X_num, X_hash, X_freq)
+            X_num = build_numeric_matrix(df, CRITEO_NUM_COLS, fill=args.numeric_fill)
+            X_hash = build_hashed_csr(df, CRITEO_CAT_COLS, args.n_hash_buckets)
+            X_freq = freq_enc.transform(df, CRITEO_CAT_COLS) if freq_enc is not None else None
+            X = combine_features(X_num, X_hash, X_freq)
 
-        if "lr" in models:
-            models["lr"].partial_fit(X, y)
+            if "lr" in models:
+                models["lr"].partial_fit(X, y)
 
-        if "ftrl" in models:
-            rows = iter_hashed_rows(df, CRITEO_NUM_COLS, CRITEO_CAT_COLS, args.n_hash_buckets, numeric_fill=args.numeric_fill, freq_encoder=freq_enc)
-            models["ftrl"].fit(rows, y)
+            if "ftrl" in models:
+                rows = iter_hashed_rows(df, CRITEO_NUM_COLS, CRITEO_CAT_COLS, args.n_hash_buckets, numeric_fill=args.numeric_fill, freq_encoder=freq_enc)
+                models["ftrl"].fit(rows, y)
 
-        # LightGBM typically needs full data; train on a bounded sample for demonstration
+        # LightGBM: collect train/val rows, then fit once after streaming
         if "lgbm" in models and args.lgbm_fit:
-            # only collect some rows, then fit once later (handled in separate small-data path)
-            pass
+            # collect TRAIN part (within train_range)
+            if not (end <= train_range[0] or start >= train_range[1]):
+                t0 = max(0, train_range[0] - start)
+                t1 = min(n, train_range[1] - start)
+                df_tr = chunk.iloc[t0:t1].copy()
+                y_tr = df_tr["label"].astype("int8").to_numpy()
+                X_num_tr = build_numeric_matrix(df_tr, CRITEO_NUM_COLS, fill=args.numeric_fill)
+                X_hash_tr = build_hashed_csr(df_tr, CRITEO_CAT_COLS, args.n_hash_buckets)
+                X_freq_tr = freq_enc.transform(df_tr, CRITEO_CAT_COLS) if freq_enc is not None else None
+                X_tr = combine_features(X_num_tr, X_hash_tr, X_freq_tr)
+                lgbm_X_tr.append(X_tr)
+                lgbm_y_tr.append(y_tr)
 
+            # collect VAL part (within val_range)
+            if not (end <= val_range[0] or start >= val_range[1]):
+                v0 = max(0, val_range[0] - start)
+                v1 = min(n, val_range[1] - start)
+                df_va = chunk.iloc[v0:v1].copy()
+                y_va = df_va["label"].astype("int8").to_numpy()
+                X_num_va = build_numeric_matrix(df_va, CRITEO_NUM_COLS, fill=args.numeric_fill)
+                X_hash_va = build_hashed_csr(df_va, CRITEO_CAT_COLS, args.n_hash_buckets)
+                X_freq_va = freq_enc.transform(df_va, CRITEO_CAT_COLS) if freq_enc is not None else None
+                X_va = combine_features(X_num_va, X_hash_va, X_freq_va)
+                lgbm_X_va.append(X_va)
+                lgbm_y_va.append(y_va)
+
+
+    # Fit LightGBM once (after collecting train/val)
+    if "lgbm" in models and args.lgbm_fit:
+        import scipy.sparse as sp
+
+        X_tr = sp.vstack(lgbm_X_tr).tocsr()
+        y_tr = np.concatenate(lgbm_y_tr)
+
+        X_va = sp.vstack(lgbm_X_va).tocsr() if len(lgbm_X_va) > 0 else None
+        y_va = np.concatenate(lgbm_y_va) if len(lgbm_y_va) > 0 else None
+
+        models["lgbm"].fit(X_tr, y_tr, X_val=X_va, y_val=y_va)
+        
     # Save models
     if "lr" in models:
         models["lr"].save(str(out / "lr.joblib"))
     if "ftrl" in models:
         models["ftrl"].save(str(out / "ftrl.joblib"))
+    if "lgbm" in models and args.lgbm_fit:
+        models["lgbm"].save(str(out / "lgbm.txt"))
 
     meta = {
         "data_path": args.data_path,
@@ -161,10 +206,13 @@ def _predict_on_split(args, run_dir: Path, split_name: str) -> pd.DataFrame:
     # Load models
     lr = None
     ftrl = None
+    lgbm = None
     if (run_dir / "lr.joblib").exists():
         lr = StreamingLogisticRegression(LRConfig()).load(str(run_dir / "lr.joblib"))
     if (run_dir / "ftrl.joblib").exists():
         ftrl = FTRLProximal.load(str(run_dir / "ftrl.joblib"))
+    if (run_dir / "lgbm.txt").exists():
+        lgbm = LightGBMWrapper().load(str(run_dir / "lgbm.txt"))
 
     rows_out = []
     cur = 0
@@ -198,6 +246,10 @@ def _predict_on_split(args, run_dir: Path, split_name: str) -> pd.DataFrame:
             rows = iter_hashed_rows(df, CRITEO_NUM_COLS, CRITEO_CAT_COLS, meta["feature"]["n_hash_buckets"], numeric_fill=args.numeric_fill, freq_encoder=freq_enc)
             p = ftrl.predict_proba(rows)
             out_df["p_ftrl"] = p
+
+        if lgbm is not None:
+            p = lgbm.predict_proba(X)[:, 1]
+            out_df["p_lgbm"] = p
 
         # carry some categorical columns for slicing
         for c in ["C1", "C2", "C3"]:
