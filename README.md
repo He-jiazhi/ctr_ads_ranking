@@ -1,7 +1,7 @@
 # CTR Prediction & Ads Ranking Optimization (Offline)
 
 End-to-end **CTR prediction → offline ranking evaluation → budgeted delivery simulation** on large-scale ad click logs (Criteo DAC format).  
-Designed to be **laptop-friendly** via **streaming / chunked training**, with reproducible CLI runs.
+All runs use **streaming / chunked training** (`chunksize=200000`) on Pitt CRC/HPC.
 
 ## What’s in this repo
 
@@ -139,19 +139,22 @@ python -m src.cli simulate --run_dir outputs/smoke_lr_fix --budget 50000
 **Model:** SGD Logistic Regression (`--lr_alpha 1e-2 --lr_l1_ratio 0.0`)  
 **Features:** hashing for categoricals (`n_hash_buckets=2^20`), no frequency encoding
 
+
 ### Offline CTR metrics
 
 | Run | max_rows | Val AUC | Val LogLoss | Test AUC | Test LogLoss | NDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|
 | LR (medium) | 10,000,000 | 0.7323 | 0.4955 | 0.7259 | 0.5094 | 0.5565 |
 | LR (full)   | 45,840,617 | 0.7337 | 0.4997 | 0.7333 | 0.5046 | 0.5636 |
+| FTRL (full) | 45,840,617 | 0.7754 | 0.4929 | 0.7737 | 0.4986 | 0.6265 |
 
 ### Budgeted delivery simulation (budget = 5,000,000)
 
 | Run | expected_clicks | realized_clicks | expected_revenue | avg_pctr_selected |
 |---|---:|---:|---:|---:|
-| LR (10M)  | 248,132.99 | 259,595 | 281,223.90 | 0.24813 |
-| LR (full) | 1,190,458.33 | 1,188,541 | 1,349,350.15 | 0.25970 |
+| LR (10M)   | 248,132.99 | 259,595 | 281,223.90 | 0.24813 |
+| LR (full)  | 1,190,458.33 | 1,188,541 | 1,349,350.15 | 0.25970 |
+| FTRL (full) | 1,101,680.75 | 1,188,541 | 1,248,783.00 | 0.24033 |
 
 > Metrics are computed on the internal val/test splits induced by `--max_rows`.
 
@@ -185,7 +188,7 @@ To still evaluate ranking quality, this repo computes **NDCG@K** over pseudo-gro
 - For large runs, prefer smaller `--chunksize` if you hit memory issues.  
 
 
-### 10M rows
+### LR 10M rows
 ```bash
 python -m src.cli train \
   --data_path data/criteo_train.tsv \
@@ -201,7 +204,7 @@ python -m src.cli slice    --run_dir outputs/lr_10m --topk_values 10
 python -m src.cli simulate --run_dir outputs/lr_10m --budget 5000000
 ```
 
-### Full (45.8M rows)
+### LR Full (45.8M rows)
 
 ```bash
 python -m src.cli train \
@@ -216,4 +219,24 @@ python -m src.cli evaluate --run_dir outputs/lr_full
 python -m src.cli ranking  --run_dir outputs/lr_full --k 10
 python -m src.cli slice    --run_dir outputs/lr_full --topk_values 10
 python -m src.cli simulate --run_dir outputs/lr_full --budget 5000000
+```
+
+### FTRL Full
+
+```bash
+python -m src.cli train \
+  --data_path data/criteo_train.tsv \
+  --out_dir outputs/ftrl_full \
+  --max_rows 45840617 \
+  --chunksize 200000 \
+  --models ftrl \
+  --ftrl_alpha 0.05 \
+  --ftrl_beta 1.0 \
+  --ftrl_l1 1.0 \
+  --ftrl_l2 1.0
+
+python -m src.cli evaluate --run_dir outputs/ftrl_full
+python -m src.cli ranking  --run_dir outputs/ftrl_full --k 10
+python -m src.cli slice    --run_dir outputs/ftrl_full --topk_values 10
+python -m src.cli simulate --run_dir outputs/ftrl_full --budget 5000000
 ```
