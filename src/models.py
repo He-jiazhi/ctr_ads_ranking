@@ -217,16 +217,25 @@ class LightGBMWrapper:
         dtrain = self.lgb.Dataset(X, label=y)
         valid_sets = [dtrain]
         valid_names = ["train"]
+        callbacks = [self.lgb.log_evaluation(period=50)]
         if X_val is not None and y_val is not None:
             dval = self.lgb.Dataset(X_val, label=y_val, reference=dtrain)
             valid_sets.append(dval)
             valid_names.append("val")
-        self.model = self.lgb.train(params, dtrain, num_boost_round=200, valid_sets=valid_sets, valid_names=valid_names, verbose_eval=50)
+            callbacks.append(self.lgb.early_stopping(stopping_rounds=20))
+        self.model = self.lgb.train(
+            params,
+            dtrain,
+            num_boost_round=200,
+            valid_sets=valid_sets,
+            valid_names=valid_names,
+            callbacks=callbacks,
+        )
         return self
 
     def predict_proba(self, X: sp.csr_matrix) -> np.ndarray:
-        p = self.model.predict(X)
-        return np.vstack([1 - p, p]).T
+        p = np.asarray(self.model.predict(X), dtype=np.float64).reshape(-1)
+        return np.column_stack((1.0 - p, p))
 
     def save(self, path: str):
         self.model.save_model(path)

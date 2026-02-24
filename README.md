@@ -147,6 +147,7 @@ python -m src.cli simulate --run_dir outputs/smoke_lr_fix --budget 50000
 | LR (medium) | 10,000,000 | 0.7323 | 0.4955 | 0.7259 | 0.5094 | 0.5565 |
 | LR (full)   | 45,840,617 | 0.7337 | 0.4997 | 0.7333 | 0.5046 | 0.5636 |
 | FTRL (full) | 45,840,617 | 0.7754 | 0.4929 | 0.7737 | 0.4986 | 0.6265 |
+| LGBM (smoke) | 200,000 | 0.7782 | 0.4753 | 0.7672 | 0.4859 | 0.6314 |
 
 ### Budgeted delivery simulation (budget = 5,000,000)
 
@@ -155,6 +156,7 @@ python -m src.cli simulate --run_dir outputs/smoke_lr_fix --budget 50000
 | LR (10M)   | 248,132.99 | 259,595 | 281,223.90 | 0.24813 |
 | LR (full)  | 1,190,458.33 | 1,188,541 | 1,349,350.15 | 0.25970 |
 | FTRL (full) | 1,101,680.75 | 1,188,541 | 1,248,783.00 | 0.24033 |
+| LGBM (smoke) | 5,305.77 | 5,385 | 6,035.28 | 0.26529 |
 
 > Metrics are computed on the internal val/test splits induced by `--max_rows`.
 
