@@ -1,27 +1,30 @@
 # CTR Prediction & Ads Ranking Optimization (Offline)
 
 End-to-end **CTR prediction → offline ranking evaluation → budgeted delivery simulation** on large-scale ad click logs (Criteo DAC format).  
-All runs use **streaming / chunked training** (`chunksize=200000`) on Pitt CRC/HPC.
+Designed to be **laptop-friendly** via **streaming / chunked training**, with reproducible CLI runs.  
+(Full-scale experiments were run on Pitt CRC/HPC; see `scripts/hpc/`.)
+
+---
 
 ## What’s in this repo
 
-- **Leakage-safe split**: time-based split by log order (train/val/test)
+- **Leakage-safe split**: time-based split by log order (train/val/test = 80%/10%/10%) within `--max_rows`
 - **Feature engineering**
-  - numeric transforms (safe log1p, missing handling)
+  - numeric transforms (safe `log1p`, missing handling)
   - **feature hashing** for high-cardinality categoricals (`C1..C26`)
   - optional **frequency encoding**
 - **Models**
-  - Logistic Regression via SGD (fast baseline)
+  - Logistic Regression via SGD (streaming baseline)
   - **FTRL-Proximal** (online learning baseline for CTR)
-  - optional LightGBM
+  - LightGBM (optional; best for smaller/sampled runs in this repo)
 - **Evaluation**
   - AUC / LogLoss / Brier
   - offline ranking metric: **NDCG@K** on pseudo-groups
   - slice / segment analysis by categorical keys (`C1/C2/C3`)
-- **Offline “delivery” simulation** under budget constraints (expected clicks / revenue trade-off)
+- **Offline “delivery” simulation** under budget constraints (expected clicks / revenue proxy)
 
 > This is an **offline** project: no online serving, no real-time auction.  
-> The simulation is a simplified proxy to demonstrate decision-making under budget.
+> The delivery simulation is a simplified proxy to demonstrate decision-making under budget.
 
 ---
 
@@ -69,11 +72,6 @@ PY
 > If your downloaded file is named differently, just rename it to `data/criteo_train.tsv`.
 
 
-### Notes on scale
-
-- Full `train.txt` is very large. Start with `--max_rows 2_000_000` (or smaller) to validate the pipeline.
-- Training uses **chunked/streaming** reads, so you can scale up by increasing `--max_rows` and/or `--chunksize`.
-
 ---
 
 ## Setup
@@ -97,57 +95,50 @@ pip install lightgbm
 
 ---
 
-## Quickstart (smoke run on 200k rows)
+## Quickstart (smoke run)
 
 Train models on a small sample:
 
-### Train (LR)
+### Train (LR, 200k rows)
 
 ```bash
 python -m src.cli train \
   --data_path data/criteo_train.tsv \
-  --out_dir outputs/smoke_lr_fix \
+  --out_dir outputs/smoke_lr \
   --max_rows 200000 \
-  --chunksize 20000 \
+  --chunksize 50000 \
   --models lr \
   --lr_alpha 1e-2 \
   --lr_l1_ratio 0.0
 ```
 
-### Evaluate
+### Evaluate + ranking + slice + simulation
 
 ```bash
-python -m src.cli evaluate --run_dir outputs/smoke_lr_fix
+python -m src.cli evaluate --run_dir outputs/smoke_lr
+python -m src.cli ranking  --run_dir outputs/smoke_lr --k 10
+python -m src.cli slice    --run_dir outputs/smoke_lr --topk_values 10
+python -m src.cli simulate --run_dir outputs/smoke_lr --budget 5000000
 ```
 
-### Offline ranking + slice diagnostics
-
-```bash
-python -m src.cli ranking --run_dir outputs/smoke_lr_fix --k 10
-python -m src.cli slice   --run_dir outputs/smoke_lr_fix --topk_values 10
-```
-
-### Budgeted delivery simulation
-
-```bash
-python -m src.cli simulate --run_dir outputs/smoke_lr_fix --budget 50000
-```
 
 ## Results (Criteo DAC)
 
 **Split:** time-based by log order, within `--max_rows` (train/val/test = 80%/10%/10%)  
-**Model:** SGD Logistic Regression (`--lr_alpha 1e-2 --lr_l1_ratio 0.0`)  
-**Features:** hashing for categoricals (`n_hash_buckets=2^20`), no frequency encoding
+**NDCG grouping:** pseudo-groups via row buckets (default group_size=50)
+**Features:** hashing for categoricals (`n_hash_buckets=2^20`), no frequency encoding unless explicitly via --use_frequency_encoding
 
 
 ### Offline CTR metrics
 
-| Run | max_rows | Val AUC | Val LogLoss | Test AUC | Test LogLoss | NDCG@10 |
-|---|---:|---:|---:|---:|---:|---:|
-| LR (medium) | 10,000,000 | 0.7323 | 0.4955 | 0.7259 | 0.5094 | 0.5565 |
-| LR (full)   | 45,840,617 | 0.7337 | 0.4997 | 0.7333 | 0.5046 | 0.5636 |
-| FTRL (full) | 45,840,617 | 0.7754 | 0.4929 | 0.7737 | 0.4986 | 0.6265 |
-| LGBM (smoke) | 200,000 | 0.7782 | 0.4753 | 0.7672 | 0.4859 | 0.6314 |
+| Run | Model | max_rows | Val AUC | Val LogLoss | Test AUC | Test LogLoss | NDCG@10 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| LR (10M) | SGD LR | 10,000,000 | 0.7323 | 0.4955 | 0.7259 | 0.5094 | 0.5565 |
+| LR (full) | SGD LR | 45,840,617 | 0.7337 | 0.4997 | 0.7333 | 0.5046 | 0.5636 |
+| FTRL (full) | FTRL-Prox | 45,840,617 | 0.7754 | 0.4929 | 0.7737 | 0.4986 | 0.6265 |
+| LGBM (smoke) | LightGBM | 200,000 | 0.7782 | 0.4753 | 0.7672 | 0.4859 | 0.6314 |
+
+> Metrics are computed on the internal val/test splits induced by `--max_rows`.
 
 ### Budgeted delivery simulation (budget = 5,000,000)
 
@@ -158,15 +149,15 @@ python -m src.cli simulate --run_dir outputs/smoke_lr_fix --budget 50000
 | FTRL (full) | 1,101,680.75 | 1,188,541 | 1,248,783.00 | 0.24033 |
 | LGBM (smoke) | 5,305.77 | 5,385 | 6,035.28 | 0.26529 |
 
-> Metrics are computed on the internal val/test splits induced by `--max_rows`.
 
 ---
 
 ## Notes on NDCG grouping
 
 CTR logs don’t include a natural “query/session” group like search ranking datasets.  
-To still evaluate ranking quality, this repo computes **NDCG@K** over pseudo-groups, e.g. row buckets (`index // group_size`) or other heuristics.
+To still evaluate ranking quality, this repo computes **NDCG@K** over pseudo-groups, e.g. row buckets:
 
+- group id ≈ index // group_size (default group_size=50)
 - Smaller group size → noisier NDCG  
 - Larger group size → more stable NDCG but less granular  
 
@@ -176,21 +167,23 @@ To still evaluate ranking quality, this repo computes **NDCG@K** over pseudo-gro
 
 - `src/data.py` : chunked loading + time split  
 - `src/features.py` : hashing + frequency encoding + sparse matrices  
-- `src/models.py` : SGD logistic, FTRL-Proximal, LightGBM wrapper (optional)  
+- `src/models.py` : SGD logistic, FTRL-Proximal, LightGBM wrapper  
 - `src/eval.py` : AUC/LogLoss, ranking metrics, slicing  
 - `src/simulate.py` : simple delivery simulation under budget constraints  
 - `src/cli.py` : command-line entrypoints  
+- `scripts/hpc/` : Slurm scripts used on Pitt CRC/HPC (recommended for large runs)
 
 ---
 
 ## Reproducibility tips
 
 - Start small: `--max_rows 200000`  
-- Scale up gradually: 2M → 10M (requires time + disk I/O)  
-- For large runs, prefer smaller `--chunksize` if you hit memory issues.  
+- Scale up gradually: 2M → 10M → full (I/O + time)
+- If you hit memory issues, prefer smaller --chunksize.  
 
+## Example commands
 
-### LR 10M rows
+### LR (10M rows)
 ```bash
 python -m src.cli train \
   --data_path data/criteo_train.tsv \
@@ -206,7 +199,7 @@ python -m src.cli slice    --run_dir outputs/lr_10m --topk_values 10
 python -m src.cli simulate --run_dir outputs/lr_10m --budget 5000000
 ```
 
-### LR Full (45.8M rows)
+### LR (Full, 45.8M rows)
 
 ```bash
 python -m src.cli train \
@@ -223,7 +216,7 @@ python -m src.cli slice    --run_dir outputs/lr_full --topk_values 10
 python -m src.cli simulate --run_dir outputs/lr_full --budget 5000000
 ```
 
-### FTRL Full
+### FTRL (Full)
 
 ```bash
 python -m src.cli train \
@@ -242,3 +235,9 @@ python -m src.cli ranking  --run_dir outputs/ftrl_full --k 10
 python -m src.cli slice    --run_dir outputs/ftrl_full --topk_values 10
 python -m src.cli simulate --run_dir outputs/ftrl_full --budget 5000000
 ```
+
+## LightGBM (smoke)
+```bash
+bash scripts/smoke_lgbm.sh outputs/smoke_lgbm
+```
+> LightGBM in this repo is intended for smoke/sampled runs. Full-data training may require further engineering (sampling / external memory / distributed training).
